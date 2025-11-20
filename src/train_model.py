@@ -14,18 +14,27 @@ def train_model():
     df = pd.read_csv(DATA_PATH, parse_dates=["GAME_DATE"])
     df = df.sort_values("GAME_DATE").reset_index(drop=True)
 
-    # ✅ Only keep regular season games
+    # Only regular season
     df = df[df["season_type"] == "Regular Season"].copy()
+
 
 
     # drop any rows with NaNs from early games
     df = df.dropna(subset=[
-    "home_off_rating_simple", "away_off_rating_simple",
-    "home_home_off_rating", "away_away_off_rating",
-    "home_rest_days", "away_rest_days",
-    "home_is_b2b", "away_is_b2b",
-    "home_injury_impact", "away_injury_impact",
+    "home_off_rating_simple",
+    "away_off_rating_simple",
+    "home_home_off_rating",
+    "away_away_off_rating",
+    "home_rest_days",
+    "away_rest_days",
+    "home_is_b2b",
+    "away_is_b2b",
+    "home_env_last5",
+    "away_env_last5",
+    "home_injury_impact",
+    "away_injury_impact",
 ])
+
 
 
     split_idx = int(0.8 * len(df))
@@ -41,9 +50,13 @@ def train_model():
     "away_rest_days",
     "home_is_b2b",
     "away_is_b2b",
+    "home_env_last5",
+    "away_env_last5",
     "home_injury_impact",
     "away_injury_impact",
 ]
+
+
 
 
     X_train = train[feature_cols]

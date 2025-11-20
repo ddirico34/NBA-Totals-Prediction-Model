@@ -75,10 +75,11 @@ def build_single_row_games():
 def add_team_ratings_with_rest_and_home_away():
     """
     For each game, add:
-    - simple offensive/defensive ratings (overall)
-    - home/away-specific offensive/defensive ratings
+    - overall offensive/defensive ratings
+    - home/away-specific scoring/defense
     - rest days + back-to-back flags
-    - injury impact placeholders (0 for now)
+    - simple game-environment feature (avg total pts in last ~5 games for each team)
+    - injury impact placeholders (kept, but will be filled via merge later)
     """
     df = pd.read_csv(PROCESSED_DIR / "games_basic.csv", parse_dates=["GAME_DATE"])
     df = df.sort_values("GAME_DATE").reset_index(drop=True)
@@ -86,7 +87,7 @@ def add_team_ratings_with_rest_and_home_away():
     records = []
 
     # team -> stats dict
-    team_stats = {}  # e.g. {"BOS": {...}}
+    team_stats = {}
 
     for _, row in df.iterrows():
         date = row["GAME_DATE"]
@@ -94,6 +95,7 @@ def add_team_ratings_with_rest_and_home_away():
         away = row["away_team"]
         hp = row["home_points"]
         ap = row["away_points"]
+        total_pts = hp + ap
 
         def get_team_stats(team):
             return team_stats.get(
@@ -109,10 +111,10 @@ def add_team_ratings_with_rest_and_home_away():
                     "away_pts_against": 0,
                     "away_games": 0,
                     "last_game_date": None,
+                    "env_totals": [],  # list of recent game totals involving this team
                 },
             )
 
-        # --- Get pre-game stats ---
         hs = get_team_stats(home)
         as_ = get_team_stats(away)
 
@@ -131,23 +133,35 @@ def add_team_ratings_with_rest_and_home_away():
                 return calc_overall_off_def(s)
             return s["away_pts_for"] / s["away_games"], s["away_pts_against"] / s["away_games"]
 
+        def calc_rest_and_b2b(s):
+            if s["last_game_date"] is None:
+                return 5, 0
+            diff = (date - s["last_game_date"]).days
+            is_b2b = 1 if diff == 1 else 0
+            return diff, is_b2b
+
+        def calc_env_last5(s):
+            env_list = s.get("env_totals", [])
+            if not env_list:
+                # fall back to overall env if we have any games at all
+                if s["games"] > 0:
+                    return (s["pts_for"] + s["pts_against"]) / s["games"]
+                return 220.0  # neutral total if absolutely no info
+            last5 = env_list[-5:]
+            return sum(last5) / len(last5)
+
+        # Pre-game ratings
         home_off, home_def = calc_overall_off_def(hs)
         away_off, away_def = calc_overall_off_def(as_)
 
         home_home_off, home_home_def = calc_home_off_def(hs)
         away_away_off, away_away_def = calc_away_off_def(as_)
 
-        # --- Rest days & back-to-back flags ---
-        def calc_rest_and_b2b(s):
-            if s["last_game_date"] is None:
-                # treat as well-rested
-                return 5, 0
-            diff = (date - s["last_game_date"]).days
-            is_b2b = 1 if diff == 1 else 0
-            return diff, is_b2b
-
         home_rest_days, home_is_b2b = calc_rest_and_b2b(hs)
         away_rest_days, away_is_b2b = calc_rest_and_b2b(as_)
+
+        home_env_last5 = calc_env_last5(hs)
+        away_env_last5 = calc_env_last5(as_)
 
         rec = row.to_dict()
 
@@ -157,26 +171,29 @@ def add_team_ratings_with_rest_and_home_away():
         rec["away_off_rating_simple"] = away_off
         rec["away_def_rating_simple"] = away_def
 
-        # home/away split ratings
+        # home/away splits
         rec["home_home_off_rating"] = home_home_off
         rec["home_home_def_rating"] = home_home_def
         rec["away_away_off_rating"] = away_away_off
         rec["away_away_def_rating"] = away_away_def
 
-        # rest & b2b
+        # rest
         rec["home_rest_days"] = home_rest_days
         rec["away_rest_days"] = away_rest_days
         rec["home_is_b2b"] = home_is_b2b
         rec["away_is_b2b"] = away_is_b2b
 
-        # injury placeholders (0 for now – later you can fill these in from another source)
-        rec["home_injury_impact"] = 0.0
-        rec["away_injury_impact"] = 0.0
+        # game environment (pace-ish)
+        rec["home_env_last5"] = home_env_last5
+        rec["away_env_last5"] = away_env_last5
+
+        # injury placeholders (kept; later overridden by merge_injury_impact if CSV present)
+        rec["home_injury_impact"] = rec.get("home_injury_impact", 0.0)
+        rec["away_injury_impact"] = rec.get("away_injury_impact", 0.0)
 
         records.append(rec)
 
-        # --- update stats AFTER the game ---
-        # home team
+        # post-game updates
         hs["pts_for"] += hp
         hs["pts_against"] += ap
         hs["games"] += 1
@@ -184,9 +201,9 @@ def add_team_ratings_with_rest_and_home_away():
         hs["home_pts_against"] += ap
         hs["home_games"] += 1
         hs["last_game_date"] = date
+        hs.setdefault("env_totals", []).append(total_pts)
         team_stats[home] = hs
 
-        # away team
         as_["pts_for"] += ap
         as_["pts_against"] += hp
         as_["games"] += 1
@@ -194,12 +211,14 @@ def add_team_ratings_with_rest_and_home_away():
         as_["away_pts_against"] += hp
         as_["away_games"] += 1
         as_["last_game_date"] = date
+        as_.setdefault("env_totals", []).append(total_pts)
         team_stats[away] = as_
 
     feat_df = pd.DataFrame(records)
     out_path = PROCESSED_DIR / "games_with_features.csv"
     feat_df.to_csv(out_path, index=False)
-    print(f"Saved game features (with rest/home-away/injury placeholders) to {out_path}")
+    print(f"Saved game features (with rest/home-away/env/injury placeholders) to {out_path}")
+
 
 def merge_injury_impact():
     games_path = PROCESSED_DIR / "games_with_features.csv"
